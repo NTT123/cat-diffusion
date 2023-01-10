@@ -6,4 +6,3 @@ opax
 pax3
 Pillow
 tensorflow_datasets
-tqdm

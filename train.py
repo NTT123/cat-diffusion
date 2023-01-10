@@ -1,5 +1,7 @@
 """Train a diffusion model."""
+import logging
 import math
+import pickle
 
 import fire
 import jax
@@ -9,7 +11,6 @@ import opax
 import pax
 import tensorflow as tf
 from PIL import Image
-from tqdm.auto import tqdm
 
 from model import GaussianDiffusion, UNet
 
@@ -44,6 +45,7 @@ def train(
     random_seed: int = 42,
     data_dir: str = "tfdata",
     hidden_dim: int = 64,
+    output_dir: str = "output",
 ):
     """Train a diffusion model."""
 
@@ -61,8 +63,8 @@ def train(
     # load tensorflow dataset from data directory
     dataset = tf.data.Dataset.load(data_dir)
     # print data directory and dataset size
-    print("Data directory:", data_dir)
-    print("Dataset size:", len(dataset))
+    logging.info("Data directory: %s", data_dir)
+    logging.info("Dataset size: %d", len(dataset))
 
     dataloader = (
         dataset.repeat()
@@ -82,8 +84,7 @@ def train(
     optimizer = opax.adam(learning_rate)(diffusion.parameters())
 
     total_loss = 0.0
-    tqdm_dataloader = tqdm(dataloader)
-    for step, batch in enumerate(tqdm_dataloader, 1):
+    for step, batch in dataloader.enumerate(start=1):
         batch = jax.tree_util.tree_map(lambda x: x.numpy(), batch)
         diffusion, optimizer, loss = fast_update_fn(diffusion, optimizer, batch)
         total_loss = total_loss + loss
@@ -91,14 +92,29 @@ def train(
         if step % log_freq == 0:
             loss = total_loss / log_freq
             total_loss = 0.0
-            tqdm_dataloader.write(f"[step {step:05d}]  train loss {loss:.3f}")
+            logging.info("[step %08d]  train loss %.3f", step, loss)
 
             imgs = jax.device_get(diffusion.eval().sample(16))
             imgs = ((imgs * 0.5 + 0.5) * 255).astype(jnp.uint8)
             imgs = make_image_grid(imgs)
             sample_image = Image.fromarray(imgs)
-            sample_image.save(f"sample_{step:05d}.png")
+            sample_image.save(f"{output_dir}/sample_{step:08d}.png")
+
+            # get model state dict
+            model_state_dict = jax.device_get(diffusion.state_dict())
+            # save model state dict to file
+            file_name = f"{output_dir}/model_{step:08d}.pkl"
+            with open(file_name, "wb") as model_ckpt_file:
+                pickle.dump(model_state_dict, model_ckpt_file)
+            logging.info("Model state dict saved to %s.", file_name)
 
 
 if __name__ == "__main__":
+
+    logging.basicConfig(
+        format="%(asctime)s %(levelname)-8s %(message)s",
+        level=logging.INFO,
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
     fire.Fire(train)
