@@ -1,0 +1,9 @@
+einops
+fire
+jax
+jaxlib
+opax
+pax3
+Pillow
+tensorflow_datasets
+tqdm
