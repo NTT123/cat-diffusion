@@ -1,3 +1,4 @@
+"""Train a diffusion model."""
 import math
 
 import fire
@@ -10,26 +11,25 @@ import tensorflow as tf
 from PIL import Image
 from tqdm.auto import tqdm
 
-from celeb_data_loader import load_celeb_a
 from model import GaussianDiffusion, UNet
 
 
 def make_image_grid(images, padding=2):
     """Place images in a square grid."""
-    n = images.shape[0]
-    size = int(math.sqrt(n))
-    assert size * size == n, "expecting a square grid"
+    num_images = images.shape[0]
+    size = int(math.sqrt(num_images))
+    assert size * size == num_images, "expecting a square grid"
     img = images[0]
 
-    H = img.shape[0] * size + padding * (size + 1)
-    W = img.shape[1] * size + padding * (size + 1)
-    out = np.zeros((H, W, img.shape[-1]), dtype=img.dtype)
-    for i in range(n):
-        x = i % size
-        y = i // size
-        xstart = x * (img.shape[0] + padding) + padding
+    height = img.shape[0] * size + padding * (size + 1)
+    width = img.shape[1] * size + padding * (size + 1)
+    out = np.zeros((height, width, img.shape[-1]), dtype=img.dtype)
+    for i in range(num_images):
+        x_coord = i % size
+        y_coord = i // size
+        xstart = x_coord * (img.shape[0] + padding) + padding
         xend = xstart + img.shape[0]
-        ystart = y * (img.shape[1] + padding) + padding
+        ystart = y_coord * (img.shape[1] + padding) + padding
         yend = ystart + img.shape[1]
         out[xstart:xend, ystart:yend, :] = images[i]
     return out
@@ -42,11 +42,14 @@ def train(
     log_freq: int = 1000,
     image_size: int = 64,
     random_seed: int = 42,
+    data_dir: str = "tfdata",
+    hidden_dim: int = 64,
 ):
+    """Train a diffusion model."""
 
     pax.seed_rng_key(random_seed)
 
-    model = UNet(dim=64, dim_mults=(1, 2, 4, 8))
+    model = UNet(dim=hidden_dim, dim_mults=(1, 2, 4, 8))
 
     diffusion = GaussianDiffusion(
         model,
@@ -55,7 +58,11 @@ def train(
         loss_type="l1",  # L1 or L2
     )
 
-    dataset = load_celeb_a()
+    # load tensorflow dataset from data directory
+    dataset = tf.data.Dataset.load(data_dir)
+    # print data directory and dataset size
+    print("Data directory:", data_dir)
+    print("Dataset size:", len(dataset))
 
     dataloader = (
         dataset.repeat()
@@ -75,8 +82,8 @@ def train(
     optimizer = opax.adam(learning_rate)(diffusion.parameters())
 
     total_loss = 0.0
-    tr = tqdm(dataloader)
-    for step, batch in enumerate(tr, 1):
+    tqdm_dataloader = tqdm(dataloader)
+    for step, batch in enumerate(tqdm_dataloader, 1):
         batch = jax.tree_util.tree_map(lambda x: x.numpy(), batch)
         diffusion, optimizer, loss = fast_update_fn(diffusion, optimizer, batch)
         total_loss = total_loss + loss
@@ -84,13 +91,13 @@ def train(
         if step % log_freq == 0:
             loss = total_loss / log_freq
             total_loss = 0.0
-            tr.write(f"[step {step:05d}]  train loss {loss:.3f}")
+            tqdm_dataloader.write(f"[step {step:05d}]  train loss {loss:.3f}")
 
             imgs = jax.device_get(diffusion.eval().sample(16))
             imgs = ((imgs * 0.5 + 0.5) * 255).astype(jnp.uint8)
             imgs = make_image_grid(imgs)
-            im = Image.fromarray(imgs)
-            im.save(f"sample_{step:05d}.png")
+            sample_image = Image.fromarray(imgs)
+            sample_image.save(f"sample_{step:05d}.png")
 
 
 if __name__ == "__main__":
