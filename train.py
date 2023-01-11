@@ -1,7 +1,7 @@
 """Train a diffusion model."""
-import logging
 import math
 import pickle
+from datetime import datetime
 
 import fire
 import jax
@@ -36,6 +36,21 @@ def make_image_grid(images, padding=2):
     return out
 
 
+def create_tensorboard_writer(
+    output_dir: str, run_name: str
+) -> tf.summary.SummaryWriter:
+    """Initialize tensorboard writer."""
+
+    # add current time to run name
+    run_name = f"{run_name}-{datetime.now().strftime('%Y-%m-%dT%H-%M-%S')}"
+    # create tensorboard writer
+    writer = tf.summary.create_file_writer(
+        f"{output_dir}/logs/{run_name}", flush_millis=60_000 * 60
+    )
+    # return tensorboard writer
+    return writer
+
+
 def train(
     batch_size: int = 32,
     learning_rate: float = 1e-4,
@@ -46,10 +61,12 @@ def train(
     data_dir: str = "tfdata",
     hidden_dim: int = 64,
     output_dir: str = "output",
+    run_name: str = "cat",
 ):
     """Train a diffusion model."""
 
     pax.seed_rng_key(random_seed)
+    writer = create_tensorboard_writer(output_dir, run_name)
 
     model = UNet(dim=hidden_dim, dim_mults=(1, 2, 4, 8))
 
@@ -63,8 +80,8 @@ def train(
     # load tensorflow dataset from data directory
     dataset = tf.data.Dataset.load(data_dir)
     # print data directory and dataset size
-    logging.info("Data directory: %s", data_dir)
-    logging.info("Dataset size: %d", len(dataset))
+    print(f"Data directory: {data_dir}")
+    print(f"Dataset size: {len(dataset)}")
 
     dataloader = (
         dataset.repeat()
@@ -84,7 +101,7 @@ def train(
     optimizer = opax.adam(learning_rate)(diffusion.parameters())
 
     total_loss = 0.0
-    for step, batch in dataloader.enumerate(start=1):
+    for step, batch in dataloader.enumerate(start=0):
         batch = jax.tree_util.tree_map(lambda x: x.numpy(), batch)
         diffusion, optimizer, loss = fast_update_fn(diffusion, optimizer, batch)
         total_loss = total_loss + loss
@@ -92,7 +109,7 @@ def train(
         if step % log_freq == 0:
             loss = total_loss / log_freq
             total_loss = 0.0
-            logging.info("[step %08d]  train loss %.3f", step, loss)
+            print(f"[step {step:08d}]  train loss {loss:.3f}")
 
             imgs = jax.device_get(diffusion.eval().sample(16))
             imgs = ((imgs * 0.5 + 0.5) * 255).astype(jnp.uint8)
@@ -100,21 +117,21 @@ def train(
             sample_image = Image.fromarray(imgs)
             sample_image.save(f"{output_dir}/sample_{step:08d}.png")
 
+            # write to tensorboard
+            with writer.as_default():
+                tf.summary.scalar("Train/loss", loss, step=step)
+                # add image to tensorboard
+                tf.summary.image("Train/sample", imgs[None], step=step)
+            writer.flush()
+
             # get model state dict
             model_state_dict = jax.device_get(diffusion.state_dict())
             # save model state dict to file
             file_name = f"{output_dir}/model_{step:08d}.pkl"
             with open(file_name, "wb") as model_ckpt_file:
                 pickle.dump(model_state_dict, model_ckpt_file)
-            logging.info("Model state dict saved to %s.", file_name)
+            print(f"Model state dict saved to {file_name}.")
 
 
 if __name__ == "__main__":
-
-    logging.basicConfig(
-        format="%(asctime)s %(levelname)-8s %(message)s",
-        level=logging.INFO,
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
-
     fire.Fire(train)
