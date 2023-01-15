@@ -2,6 +2,8 @@
 import math
 import pickle
 from datetime import datetime
+from pathlib import Path
+from typing import Tuple
 
 import fire
 import jax
@@ -51,6 +53,52 @@ def create_tensorboard_writer(
     return writer
 
 
+def save_model(diffusion: GaussianDiffusion, output_dir: str, step: int):
+    """Save model state dict to file."""
+    # get model state dict
+    model_state_dict = jax.device_get(diffusion.state_dict())
+    # save model state dict to file
+    file_name = f"{output_dir}/model_{step:08d}.pkl"
+    with open(file_name, "wb") as model_ckpt_file:
+        pickle.dump(model_state_dict, model_ckpt_file)
+    print(f"Model state dict saved to {file_name}.")
+
+
+def create_or_load_model(
+    image_size: int, hidden_dim: int, output_dir: str
+) -> Tuple[GaussianDiffusion, int]:
+    """Create or load model from file."""
+    # create unet model
+    unet = UNet(dim=hidden_dim, dim_mults=(1, 2, 4, 8))
+    # create diffusion model
+    diffusion = GaussianDiffusion(
+        unet,
+        image_size=image_size,
+        timesteps=1000,
+        loss_type="l1",  # L1 or L2
+    )
+    last_training_step = 0
+
+    # load model state dict from file if exists
+    # list model files in the output directory
+    # that matches the pattern model_*.pkl
+    model_files = list(Path(output_dir).glob("model_*.pkl"))
+    # sort model files by step
+    model_files.sort(key=lambda x: int(x.stem.split("_")[-1]))
+    # if model files exist, load the last one
+    if model_files:
+        model_file = model_files[-1]
+        last_training_step = int(model_file.stem.split("_")[-1])
+        with open(model_file, "rb") as model_ckpt_file:
+            model_state_dict = pickle.load(model_ckpt_file)
+            # load model state dict
+            diffusion = diffusion.load_state_dict(model_state_dict)
+            print(f"Model state dict loaded from {model_file}.")
+
+    # return diffusion model and last step
+    return diffusion, last_training_step
+
+
 def train(
     batch_size: int = 32,
     learning_rate: float = 1e-4,
@@ -68,13 +116,8 @@ def train(
     pax.seed_rng_key(random_seed)
     writer = create_tensorboard_writer(output_dir, run_name)
 
-    model = UNet(dim=hidden_dim, dim_mults=(1, 2, 4, 8))
-
-    diffusion = GaussianDiffusion(
-        model,
-        image_size=image_size,
-        timesteps=1000,
-        loss_type="l1",  # L1 or L2
+    diffusion, last_training_step = create_or_load_model(
+        image_size, hidden_dim, output_dir
     )
 
     # load tensorflow dataset from data directory
@@ -101,7 +144,7 @@ def train(
     optimizer = opax.adam(learning_rate)(diffusion.parameters())
 
     total_loss = 0.0
-    for step, batch in dataloader.enumerate(start=1):
+    for step, batch in dataloader.enumerate(start=last_training_step + 1):
         batch = jax.tree_util.tree_map(lambda x: x.numpy(), batch)
         diffusion, optimizer, loss = fast_update_fn(diffusion, optimizer, batch)
         total_loss = total_loss + loss
@@ -124,13 +167,7 @@ def train(
             with writer.as_default():
                 tf.summary.image("Train/sample", imgs[None], step=step)
                 writer.flush()
-            # get model state dict
-            model_state_dict = jax.device_get(diffusion.state_dict())
-            # save model state dict to file
-            file_name = f"{output_dir}/model_{step:08d}.pkl"
-            with open(file_name, "wb") as model_ckpt_file:
-                pickle.dump(model_state_dict, model_ckpt_file)
-            print(f"Model state dict saved to {file_name}.")
+            save_model(diffusion, output_dir, step)
 
 
 if __name__ == "__main__":
