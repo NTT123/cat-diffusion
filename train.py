@@ -55,7 +55,7 @@ def train(
     batch_size: int = 32,
     learning_rate: float = 1e-4,
     num_training_steps: int = 10_000,
-    log_freq: int = 1000,
+    log_freq: int = 100,
     image_size: int = 64,
     random_seed: int = 42,
     data_dir: str = "tfdata",
@@ -101,7 +101,7 @@ def train(
     optimizer = opax.adam(learning_rate)(diffusion.parameters())
 
     total_loss = 0.0
-    for step, batch in dataloader.enumerate(start=0):
+    for step, batch in dataloader.enumerate(start=1):
         batch = jax.tree_util.tree_map(lambda x: x.numpy(), batch)
         diffusion, optimizer, loss = fast_update_fn(diffusion, optimizer, batch)
         total_loss = total_loss + loss
@@ -110,20 +110,20 @@ def train(
             loss = total_loss / log_freq
             total_loss = 0.0
             print(f"[step {step:08d}]  train loss {loss:.3f}")
+            # write to tensorboard
+            with writer.as_default():
+                tf.summary.scalar("Train/loss", loss, step=step)
 
+        if step % 1000 == 0:
             imgs = jax.device_get(diffusion.eval().sample(16))
             imgs = ((imgs * 0.5 + 0.5) * 255).astype(jnp.uint8)
             imgs = make_image_grid(imgs)
             sample_image = Image.fromarray(imgs)
             sample_image.save(f"{output_dir}/sample_{step:08d}.png")
-
-            # write to tensorboard
+            # add image to tensorboard
             with writer.as_default():
-                tf.summary.scalar("Train/loss", loss, step=step)
-                # add image to tensorboard
                 tf.summary.image("Train/sample", imgs[None], step=step)
-            writer.flush()
-
+                writer.flush()
             # get model state dict
             model_state_dict = jax.device_get(diffusion.state_dict())
             # save model state dict to file
